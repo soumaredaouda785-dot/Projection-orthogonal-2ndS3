@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Dessin 2D → 3D</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;font-family:sans-serif;background:#fff;position:fixed;width:100%}
+canvas{position:fixed;left:0;top:0;touch-action:none}
+#info{position:fixed;left:6px;top:6px;right:6px;font-size:13px;color:#333;background:rgba(255,255,255,.85);padding:3px 8px;border-radius:6px;pointer-events:none}
+#gear{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(10px + env(safe-area-inset-bottom));z-index:5;padding:10px 18px;border-radius:22px;border:1px solid #222;background:#222;color:#fff;font-size:15px}
+#panel{position:fixed;left:0;right:0;bottom:calc(60px + env(safe-area-inset-bottom));max-height:48vh;overflow:auto;background:#fff;border-top:1px solid #999;border-radius:14px 14px 0 0;box-shadow:0 -4px 16px rgba(0,0,0,.25);padding:6px;z-index:4;touch-action:pan-y}
+.row{display:flex;flex-wrap:wrap;gap:5px;padding:4px;align-items:center}
+button,select{padding:8px 10px;border:1px solid #333;background:#fff;border-radius:6px;font-size:14px}
+button.on{background:#222;color:#fff}
+.big{flex:1;background:#1a6ef0;color:#fff;border-color:#1a6ef0}
+label{font-size:14px;display:flex;align-items:center;gap:4px}
+input[type=color]{width:38px;height:34px;padding:0}
+h4{margin:6px 4px 0;font-size:12px;color:#666;text-transform:uppercase;width:100%}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<button id="gear">⚙ Réglages</button>
+<div id="panel" style="display:none">
+ <div class="row" id="rMode">
+  <button id="bD" class="on">Dessiner</button><button id="bT">Trou</button>
+  <button id="bU">Annuler</button><button id="bX">Effacer</button>
+ </div>
+ <div class="row"><button id="b3" class="big">Voir en 3D</button></div>
+ <div id="r2d">
+  <h4>Feuille</h4>
+  <div class="row">
+   <select id="fmt"><option>A5</option><option selected>A4</option><option>A3</option><option>A2</option><option>A1</option><option>A0</option></select>
+   <button id="ori" data-o="P">Portrait</button>
+   <select id="snap"><option value="1">Pas 1 mm</option><option value="5">Pas 5 mm</option><option value="10" selected>Pas 10 mm</option><option value="20">Pas 20 mm</option></select>
+  </div>
+ </div>
+ <h4>Affichage</h4>
+ <div class="row">
+  <label><input id="grid" type="checkbox" checked> Grille</label>
+  <label id="lc"><input id="cotes" type="checkbox" checked> Cotes (mm)</label>
+  <button id="zi">Zoom +</button><button id="zo">Zoom −</button><button id="zr">Recentrer</button>
+ </div>
+ <div id="r3d" style="display:none">
+  <h4>Vues</h4>
+  <div class="row">
+   <button data-v="face">Face</button><button data-v="gauche">Gauche</button><button data-v="droite">Droite</button>
+   <button data-v="dessus">Dessus</button><button data-v="dessous">Dessous</button><button data-v="arriere">Derrière</button>
+   <button data-v="iso">Iso</button>
+  </div>
+  <h4>Pièce</h4>
+  <div class="row">
+   <label>Épaisseur <input id="ep" type="range" min="2" max="300" value="40"> <span id="epv">40</span> mm</label>
+   <label><input id="hid" type="checkbox" checked> Traits cachés</label>
+   <label><input id="per" type="checkbox"> Perspective</label>
+   <label><input id="fill" type="checkbox" checked> Couleur</label>
+   <input id="col" type="color" value="#6fb1fc">
+  </div>
+ </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const c=$("c"),ctx=c.getContext("2d");
+const F={A5:[148,210],A4:[210,297],A3:[297,420],A2:[420,594],A1:[594,841],A0:[841,1189]};
+const VIEWS={face:[0,0,"Vue de face"],gauche:[90,0,"Vue de gauche"],droite:[-90,0,"Vue de droite"],
+  dessus:[0,90,"Vue de dessus"],dessous:[0,-90,"Vue de dessous"],arriere:[180,0,"Vue de derrière"],iso:[-35,28,"Vue isométrique"]};
+let W,H,dpr=1,mode="D",is3D=false,pts=[],edges=[],holes=[],active=-1,tmp=null,stack=[],cur=null,viewName="";
+let yaw=-.6,pit=.5,zoom=1,pan={x:0,y:0},S3=1,D3=1;
+const f1=n=>Math.round(n*10)/10;
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+
+function resize(){
+  dpr=devicePixelRatio||1;W=innerWidth;H=innerHeight;
+  c.width=W*dpr;c.height=H*dpr;c.style.width=W+"px";c.style.height=H+"px";draw();
+}
+addEventListener("resize",resize);
+
+/* ---------- feuille et repères (mm) ---------- */
+function sheet(){const f=F[$("fmt").value];return $("ori").dataset.o=="L"?[f[1],f[0]]:f}
+function sc2(){const[s,t]=sheet();return Math.min((W-20)/s,(H-20)/t)*zoom}
+function toS(p){const[s,t]=sheet(),k=sc2();return{x:W/2+pan.x+(p.x-s/2)*k,y:H/2+pan.y+(p.y-t/2)*k}}
+function toW(q){const[s,t]=sheet(),k=sc2();return{x:(q.x-W/2-pan.x)/k+s/2,y:(q.y-H/2-pan.y)/k+t/2}}
+function snapW(p){const s=+$("snap").value;return{x:Math.round(p.x/s)*s,y:Math.round(p.y/s)*s}}
+function pos(e){const r=c.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}}
+function target(q){
+  let hit=-1,best=18;
+  pts.forEach((p,i)=>{const s=toS(p),d=Math.hypot(s.x-q.x,s.y-q.y);if(d<best){best=d;hit=i}});
+  return{hit,w:hit>=0?{x:pts[hit].x,y:pts[hit].y}:snapW(toW(q))};
+}
+
+/* ---------- historique / actions ---------- */
+function save(){stack.push(JSON.stringify({pts,edges,holes,active}))}
+function link(a,b){if(!edges.some(e=>(e[0]==a&&e[1]==b)||(e[0]==b&&e[1]==a)))edges.push([a,b])}
+function tap(q){
+  save();const T=target(q);
+  if(mode=="T"){
+    if(tmp){const r=dist(T.w,tmp);if(r>0)holes.push({x:tmp.x,y:tmp.y,r});tmp=null}else tmp=T.w;
+    return;
+  }
+  if(T.hit>=0){
+    if(T.hit==active)active=-1;
+    else{if(active>=0)link(active,T.hit);active=T.hit}
+  }else{
+    pts.push(T.w);const n=pts.length-1;
+    if(active>=0)link(active,n);
+    active=n;
+  }
+}
+
+/* ---------- gestes ---------- */
+const ptr=new Map();let pinch=null,multi=false,down=null,moved=false;
+function zoomAt(m,f){
+  const nz=Math.max(.2,Math.min(40,zoom*f)),g=nz/zoom;
+  pan.x=m.x-W/2-(m.x-W/2-pan.x)*g;pan.y=m.y-H/2-(m.y-H/2-pan.y)*g;zoom=nz;
+}
+function two(){const[a,b]=[...ptr.values()];return{d:Math.hypot(a.x-b.x,a.y-b.y)||1,m:{x:(a.x+b.x)/2,y:(a.y+b.y)/2}}}
+c.addEventListener("pointerdown",e=>{
+  c.setPointerCapture(e.pointerId);ptr.set(e.pointerId,pos(e));
+  if(ptr.size==1){multi=false;down=pos(e);moved=false;if(!is3D)cur=pos(e)}
+  else{multi=true;cur=null;pinch=two()}
+  draw();
+});
+c.addEventListener("pointermove",e=>{
+  const p=pos(e);
+  if(!ptr.has(e.pointerId)){if(!is3D&&e.pointerType=="mouse"){cur=p;draw()}return}
+  const old=ptr.get(e.pointerId);ptr.set(e.pointerId,p);
+  if(ptr.size==2){
+    const n=two();
+    if(pinch){zoomAt(n.m,n.d/pinch.d);pan.x+=n.m.x-pinch.m.x;pan.y+=n.m.y-pinch.m.y}
+    pinch=n;draw();return;
+  }
+  if(Math.hypot(p.x-down.x,p.y-down.y)>6)moved=true;
+  if(is3D){
+    if(moved){yaw+=(p.x-old.x)*.01;pit=Math.max(-1.57,Math.min(1.57,pit+(p.y-old.y)*.01));viewName="";draw()}
+  }else{cur=p;draw()}
+});
+function up(e){
+  const single=ptr.size==1&&!multi;ptr.delete(e.pointerId);pinch=null;
+  if(e.type=="pointerup"&&single&&!is3D)tap(pos(e));
+  if(ptr.size==0)multi=false;
+  cur=(e.pointerType=="mouse"&&!is3D)?pos(e):null;
+  draw();
+}
+c.addEventListener("pointerup",up);c.addEventListener("pointercancel",up);
+c.addEventListener("wheel",e=>{e.preventDefault();zoomAt(pos(e),e.deltaY<0?1.15:1/1.15);draw()},{passive:false});
+
+/* ---------- boutons ---------- */
+$("gear").onclick=()=>{const p=$("panel"),o=p.style.display=="none";p.style.display=o?"block":"none";$("gear").textContent=o?"✕ Fermer":"⚙ Réglages"};
+$("bD").onclick=()=>{mode="D";$("bD").className="on";$("bT").className="";tmp=null;draw()};
+$("bT").onclick=()=>{mode="T";$("bT").className="on";$("bD").className="";draw()};
+$("bU").onclick=()=>{
+  if(tmp)tmp=null;
+  else if(stack.length){const s=JSON.parse(stack.pop());pts=s.pts;edges=s.edges;holes=s.holes;active=s.active}
+  draw();
+};
+$("bX").onclick=()=>{save();pts=[];edges=[];holes=[];active=-1;tmp=null;draw()};
+$("b3").onclick=()=>{
+  if(!is3D&&!faces().cyc.some(f=>f.A>1e-6)){alert("Ferme d'abord une forme (relie les points pour faire une boucle).");return}
+  is3D=!is3D;zoom=1;pan={x:0,y:0};cur=null;
+  $("b3").textContent=is3D?"Retour 2D":"Voir en 3D";
+  $("r3d").style.display=is3D?"block":"none";
+  $("r2d").style.display=$("rMode").style.display=$("lc").style.display=is3D?"none":"";
+  draw();
+};
+$("ori").onclick=()=>{const b=$("ori");b.dataset.o=b.dataset.o=="P"?"L":"P";b.textContent=b.dataset.o=="P"?"Portrait":"Paysage";zoom=1;pan={x:0,y:0};draw()};
+$("fmt").onchange=()=>{zoom=1;pan={x:0,y:0};draw()};
+document.querySelectorAll("[data-v]").forEach(b=>b.onclick=()=>{
+  const v=VIEWS[b.dataset.v];yaw=v[0]*Math.PI/180;pit=v[1]*Math.PI/180;viewName=v[2];
+  if(b.dataset.v!="iso")$("per").checked=false;
+  pan={x:0,y:0};draw();
+});
+["snap","grid","cotes","ep","hid","per","fill","col"].forEach(id=>$(id).oninput=()=>{$("epv").textContent=$("ep").value;draw()});
+$("zi").onclick=()=>{zoomAt({x:W/2,y:H/2},1.3);draw()};
+$("zo").onclick=()=>{zoomAt({x:W/2,y:H/2},1/1.3);draw()};
+$("zr").onclick=()=>{zoom=1;pan={x:0,y:0};draw()};
+
+/* ---------- affichage ---------- */
+function txt(s,x,y,col){
+  ctx.font="bold 13px sans-serif";ctx.textAlign="center";
+  x=Math.max(50,Math.min(W-50,x));
+  ctx.lineWidth=4;ctx.strokeStyle="#fff";ctx.strokeText(s,x,y);ctx.fillStyle=col||"#000";ctx.fillText(s,x,y);
+}
+function draw(){
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.setLineDash([]);
+  ctx.fillStyle=is3D?"#fff":"#d4d4d4";ctx.fillRect(0,0,W,H);
+  if(is3D)draw3D();else draw2D();
+}
+function draw2D(){
+  const[s,t]=sheet(),k=sc2(),o=toS({x:0,y:0});
+  ctx.fillStyle="#fff";ctx.fillRect(o.x,o.y,s*k,t*k);
+  if($("grid").checked){
+    let st=+$("snap").value;while(st*k<7)st*=5;
+    ctx.strokeStyle="#e3e3e3";ctx.lineWidth=1;ctx.beginPath();
+    for(let x=st;x<s;x+=st){ctx.moveTo(o.x+x*k,o.y);ctx.lineTo(o.x+x*k,o.y+t*k)}
+    for(let y=st;y<t;y+=st){ctx.moveTo(o.x,o.y+y*k);ctx.lineTo(o.x+s*k,o.y+y*k)}
+    ctx.stroke();
+  }
+  ctx.strokeStyle="#000";ctx.lineWidth=1.5;ctx.strokeRect(o.x,o.y,s*k,t*k);
+  ctx.lineWidth=.8;ctx.strokeRect(o.x+10*k,o.y+10*k,(s-20)*k,(t-20)*k);
+  ctx.lineWidth=2;ctx.beginPath();
+  edges.forEach(([a,b])=>{const A=toS(pts[a]),B=toS(pts[b]);ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y)});
+  ctx.stroke();
+  holes.forEach(h=>{const q=toS(h);ctx.beginPath();ctx.arc(q.x,q.y,h.r*k,0,7);ctx.stroke()});
+  if($("cotes").checked){
+    edges.forEach(([a,b])=>{
+      const A=toS(pts[a]),B=toS(pts[b]);
+      if(Math.hypot(A.x-B.x,A.y-B.y)>34)txt(f1(dist(pts[a],pts[b])),(A.x+B.x)/2,(A.y+B.y)/2-6,"#0a4");
+    });
+    holes.forEach(h=>{const q=toS(h);txt("Ø"+f1(h.r*2),q.x,q.y+4,"#0a4")});
+  }
+  pts.forEach((p,i)=>{const q=toS(p);ctx.fillStyle=i==active?"red":"#000";ctx.beginPath();ctx.arc(q.x,q.y,i==active?7:4,0,7);ctx.fill()});
+  if(tmp){const q=toS(tmp);ctx.fillStyle="red";ctx.beginPath();ctx.arc(q.x,q.y,5,0,7);ctx.fill()}
+  /* mesure en direct */
+  if(cur){
+    const T=target(cur),Q=toS(T.w);
+    ctx.strokeStyle="#1a6ef0";ctx.lineWidth=2;ctx.setLineDash([6,4]);
+    let label="x "+f1(T.w.x)+"  y "+f1(T.w.y)+" mm";
+    if(mode=="T"&&tmp){
+      const r=dist(T.w,tmp),q0=toS(tmp);
+      ctx.beginPath();ctx.arc(q0.x,q0.y,r*k,0,7);ctx.moveTo(q0.x,q0.y);ctx.lineTo(Q.x,Q.y);ctx.stroke();
+      label="R "+f1(r)+"  Ø "+f1(2*r)+" mm";
+    }else if(mode=="D"&&active>=0){
+      const A=toS(pts[active]),dx=T.w.x-pts[active].x,dy=T.w.y-pts[active].y;
+      ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(Q.x,Q.y);ctx.stroke();
+      let ang=Math.atan2(-dy,dx)*180/Math.PI;if(ang<0)ang+=360;
+      label=f1(Math.hypot(dx,dy))+" mm  ∠ "+f1(ang)+"°";
+    }
+    ctx.setLineDash([]);ctx.beginPath();ctx.arc(Q.x,Q.y,7,0,7);ctx.stroke();
+    txt(label,Q.x,Q.y-48,"#1a6ef0");
+  }
+  $("info").textContent=mode=="T"?(tmp?"Touche le rayon du trou.":"Touche le centre du trou.")
+    :active>=0?"Point rouge = départ. Touche un point pour t'y relier, ou le rouge pour le lâcher."
+    :"Touche pour poser un point, ou un point existant pour continuer depuis lui.";
+}
+
+/* ---------- faces du dessin ---------- */
+function faces(){
+  const nb=pts.map(()=>[]);
+  edges.forEach(([a,b])=>{nb[a].push(b);nb[b].push(a)});
+  const ang=(i,j)=>Math.atan2(-(pts[j].y-pts[i].y),pts[j].x-pts[i].x);
+  nb.forEach((l,i)=>l.sort((u,v)=>ang(i,u)-ang(i,v)));
+  const fo={},cyc=[];
+  edges.forEach(([a0,b0])=>[[a0,b0],[b0,a0]].forEach(([a,b])=>{
+    if(fo[a+"_"+b]!==undefined)return;
+    const id=cyc.length,cy=[];let u=a,v=b,g=0;
+    while(fo[u+"_"+v]===undefined&&g++<2000){
+      fo[u+"_"+v]=id;cy.push(u);
+      const l=nb[v],k=l.indexOf(u),w=l[(k-1+l.length)%l.length];u=v;v=w;
+    }
+    let A=0;cy.forEach((p,i)=>{const P=pts[p],Q=pts[cy[(i+1)%cy.length]];A+=P.x*-Q.y-Q.x*-P.y});
+    cyc.push({cy,A:A/2});
+  }));
+  return{fo,cyc};
+}
+
+/* ---------- 3D ---------- */
+function R(x,y,z){
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pit),sp=Math.sin(pit);
+  const x1=x*cy+z*sy,z1=-x*sy+z*cy;return[x1,y*cp-z1*sp,y*sp+z1*cp];
+}
+function Rinv(x,y,z){
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pit),sp=Math.sin(pit);
+  const y1=y*cp+z*sp,z1=-y*sp+z*cp;return[x*cy-z1*sy,y1,x*sy+z1*cy];
+}
+function P(v){
+  const r=R(...v),k=$("per").checked?D3/(D3-r[2]):1;
+  return[W/2+pan.x+r[0]*k*S3,H/2+pan.y-r[1]*k*S3];
+}
+const norm=v=>{const l=Math.hypot(...v)||1;return v.map(x=>x/l)};
+const lerp=(A,B,t)=>[A[0]+(B[0]-A[0])*t,A[1]+(B[1]-A[1])*t,A[2]+(B[2]-A[2])*t];
+
+function draw3D(){
+  const{fo,cyc}=faces(),In=k=>fo[k]!==undefined&&cyc[fo[k]].A>1e-6;
+  const h=+$("ep").value/2,N=28,per=$("per").checked;
+  const xs=pts.map(p=>p.x),ys=pts.map(p=>-p.y);
+  const cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
+  const Pt=i=>({x:pts[i].x-cx,y:-pts[i].y-cy});
+  let Rm=h;pts.forEach((_,i)=>{const p=Pt(i);Rm=Math.max(Rm,Math.hypot(p.x,p.y,h))});
+  holes.forEach(o=>{Rm=Math.max(Rm,Math.hypot(o.x-cx,-o.y-cy)+o.r)});
+  S3=0.4*Math.min(W,H)/Rm*zoom;D3=3.5*Rm;
+  const eps=Rm*0.004;
+
+  const polys=cyc.filter(f=>f.A>1e-6).map(f=>f.cy.map(i=>{const p=Pt(i);return[p.x,p.y]}));
+  const hc=holes.map(o=>({x:o.x-cx,y:-o.y-cy,r:o.r}));
+  const side=[],vn={};
+  edges.forEach(([a,b])=>[[a,b],[b,a]].forEach(([u,v])=>{
+    if(In(u+"_"+v)&&!In(v+"_"+u)){
+      const A=Pt(u),B=Pt(v),n=norm([B.y-A.y,-(B.x-A.x),0]);
+      side.push({A,B,n});(vn[u]=vn[u]||[]).push(n);(vn[v]=vn[v]||[]).push(n);
+    }
+  }));
+
+  /* ----- test d'occultation exact (rayon vers la caméra) ----- */
+  const pip=(poly,x,y)=>{let r=false;
+    for(let i=0,j=poly.length-1;i<poly.length;j=i++){const a=poly[i],b=poly[j];
+      if((a[1]>y)!=(b[1]>y)&&x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])r=!r}return r};
+  const dseg=(x,y,A,B)=>{const dx=B.x-A.x,dy=B.y-A.y,l=dx*dx+dy*dy;
+    let t=l?((x-A.x)*dx+(y-A.y)*dy)/l:0;t=Math.max(0,Math.min(1,t));return Math.hypot(x-A.x-t*dx,y-A.y-t*dy)};
+  const inside=(x,y,z)=>{
+    if(Math.abs(z)>=h-eps)return false;
+    if(!polys.some(p=>pip(p,x,y)))return false;
+    for(const o of hc)if(Math.hypot(x-o.x,y-o.y)<o.r+eps)return false;
+    for(const s of side)if(dseg(x,y,s.A,s.B)<eps)return false;
+    return true;
+  };
+  const dO=Rinv(0,0,1),Cm=Rinv(0,0,D3);
+  function occ(X){
+    let d=dO,tmax=5*Rm;
+    if(per){d=[Cm[0]-X[0],Cm[1]-X[1],Cm[2]-X[2]];tmax=Math.hypot(...d);d=d.map(v=>v/tmax)}
+    let lo=eps,hi=tmax;
+    if(Math.abs(d[2])>1e-9){let a=(-h-X[2])/d[2],b=(h-X[2])/d[2];if(a>b)[a,b]=[b,a];lo=Math.max(lo,a);hi=Math.min(hi,b)}
+    else if(Math.abs(X[2])>=h-eps)return false;
+    if(hi-lo<eps)return false;
+    const T=[lo,hi],x0=X[0],y0=X[1],dx=d[0],dy=d[1];
+    side.forEach(s=>{
+      const ex=s.B.x-s.A.x,ey=s.B.y-s.A.y,den=dx*ey-dy*ex;
+      if(Math.abs(den)<1e-12)return;
+      const t=((s.A.x-x0)*ey-(s.A.y-y0)*ex)/den,u=((s.A.x-x0)*dy-(s.A.y-y0)*dx)/den;
+      if(u>=0&&u<=1&&t>lo&&t<hi)T.push(t);
+    });
+    const a=dx*dx+dy*dy;
+    if(a>1e-12)hc.forEach(o=>{
+      const b=2*(dx*(x0-o.x)+dy*(y0-o.y)),cc=(x0-o.x)**2+(y0-o.y)**2-o.r*o.r,D=b*b-4*a*cc;
+      if(D>0){const q=Math.sqrt(D);[(-b-q)/(2*a),(-b+q)/(2*a)].forEach(t=>{if(t>lo&&t<hi)T.push(t)})}
+    });
+    T.sort((p,q)=>p-q);
+    for(let i=0;i<T.length-1;i++){
+      if(T[i+1]-T[i]<eps*.5)continue;
+      const m=(T[i]+T[i+1])/2;
+      if(inside(x0+dx*m,y0+dy*m,X[2]+d[2]*m))return true;
+    }
+    return false;
+  }
+
+  /* ----- traits (découpés en morceaux visibles / cachés) ----- */
+  const L=[];
+  function addEdge(A,B,n){
+    let s=0,vis=null;
+    for(let i=0;i<=n;i++){
+      let v=null;
+      if(i<n)v=!occ(lerp(A,B,(i+.5)/n));
+      if(vis===null)vis=v;
+      else if(v!==vis){L.push([lerp(A,B,s/n),lerp(A,B,i/n),vis]);s=i;vis=v}
+    }
+  }
+  const nFor=(A,B)=>Math.max(1,Math.min(16,Math.ceil(Math.hypot(B[0]-A[0],B[1]-A[1],B[2]-A[2])/(Rm/10))));
+  edges.forEach(([a,b])=>{
+    const A=Pt(a),B=Pt(b);
+    [h,-h].forEach(z=>{const p=[A.x,A.y,z],q=[B.x,B.y,z];addEdge(p,q,nFor(p,q))});
+  });
+  Object.keys(vn).forEach(i=>{
+    const l=vn[i];
+    if(l.length==2&&l[0][0]*l[1][0]+l[0][1]*l[1][1]>0.9995)return;
+    const A=Pt(+i);addEdge([A.x,A.y,h],[A.x,A.y,-h],nFor([0,0,h],[0,0,-h]));
+  });
+  const ring=(o,i)=>{const t=i/N*6.2832;return[o.x+o.r*Math.cos(t),o.y+o.r*Math.sin(t)]};
+  hc.forEach(o=>{
+    for(let i=0;i<N;i++){
+      const A=ring(o,i),B=ring(o,i+1);
+      [h,-h].forEach(z=>addEdge([A[0],A[1],z],[B[0],B[1],z],1));
+      if(i%(N/4)==0)addEdge([A[0],A[1],h],[A[0],A[1],-h],6);
+    }
+  });
+
+  /* ----- grille 3D (plan derrière la pièce) ----- */
+  if($("grid").checked){
+    const E=Rm*1.5,steps=[1,5,10,20,50,100,200,500,1000,2000];
+    const st=steps.find(s=>s*S3>=14&&2*E/s<=90)||steps.find(s=>2*E/s<=90)||2000;
+    ctx.strokeStyle="#e4e4e4";ctx.lineWidth=1;ctx.beginPath();
+    for(let g=-Math.floor(E/st)*st;g<=E;g+=st){
+      let a=P([g,-E,-h]),b=P([g,E,-h]);ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);
+      a=P([-E,g,-h]);b=P([E,g,-h]);ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);
+    }
+    ctx.stroke();
+  }
+
+  /* ----- couleurs ----- */
+  if($("fill").checked){
+    const col=$("col").value,rgb=[1,3,5].map(i=>parseInt(col.substr(i,2),16));
+    const shade=nz=>"rgb("+rgb.map(v=>Math.round(v*(.45+.55*nz))).join(",")+")";
+    const quad=(A,B,nz)=>{
+      ctx.fillStyle=shade(nz);ctx.beginPath();
+      [[A.x,A.y,h],[B.x,B.y,h],[B.x,B.y,-h],[A.x,A.y,-h]].forEach((v,i)=>{const s=P(v);i?ctx.lineTo(s[0],s[1]):ctx.moveTo(s[0],s[1])});
+      ctx.closePath();ctx.fill();
+    };
+    hc.forEach(o=>{for(let i=0;i<N;i++){
+      const t=(i+.5)/N*6.2832,nz=R(-Math.cos(t),-Math.sin(t),0)[2];
+      if(nz>0){const A=ring(o,i),B=ring(o,i+1);quad({x:A[0],y:A[1]},{x:B[0],y:B[1]},nz)}
+    }});
+    side.map(s=>({s,nz:R(...s.n)[2],d:R((s.A.x+s.B.x)/2,(s.A.y+s.B.y)/2,0)[2]}))
+      .filter(o=>o.nz>0).sort((a,b)=>a.d-b.d).forEach(o=>quad(o.s.A,o.s.B,o.nz));
+    const fF=R(0,0,1)[2]>0,z=fF?h:-h;
+    ctx.beginPath();
+    polys.forEach(p=>{p.forEach((v,k)=>{const q=P([v[0],v[1],z]);k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])});ctx.closePath()});
+    hc.forEach(o=>{for(let i=0;i<N;i++){const A=ring(o,i),q=P([A[0],A[1],z]);i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])}ctx.closePath()});
+    ctx.fillStyle=shade(Math.abs(R(0,0,1)[2]));ctx.fill("evenodd");
+  }
+
+  /* ----- dessin des traits : cachés (pointillés) puis visibles ----- */
+  [false,true].forEach(v=>{
+    if(!v&&!$("hid").checked)return;
+    ctx.setLineDash(v?[]:[7,5]);ctx.strokeStyle=v?"#000":"#555";ctx.lineWidth=v?2:1.2;ctx.beginPath();
+    L.filter(l=>l[2]==v).forEach(l=>{const A=P(l[0]),B=P(l[1]);ctx.moveTo(A[0],A[1]);ctx.lineTo(B[0],B[1])});
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  if(viewName)txt(viewName,W/2,52,"#1a6ef0");
+  $("info").textContent="Pièce "+f1(Math.max(...xs)-Math.min(...xs))+" × "+f1(Math.max(...ys.map(y=>-y))-Math.min(...ys.map(y=>-y)))+" × "+f1(2*h)+" mm  ·  1 doigt : tourner, 2 doigts : zoom";
+}
+resize();
+</script>
+</body></html>
